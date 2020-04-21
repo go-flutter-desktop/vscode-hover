@@ -1,7 +1,7 @@
 {
 	"name": "hover",
 	"displayName": "Hover",
-	"description": "Hover integration for VS Code",
+	"description": "EXPERIMENTAL | Hover integration for VS Code",
 	"version": "0.0.1",
 	"publisher": "go-flutter",
 	"author": {
