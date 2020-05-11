@@ -1,6 +1,85 @@
 import * as vscode from 'vscode';
-import { isUndefined } from 'util';
+import { isUndefined, isNullOrUndefined } from 'util';
 import { runHoverRun } from './util';
+import * as path from 'path';
+import * as fs from 'fs';
+import * as jsyaml from 'js-yaml';
+
+// detectPubspecFromDir recursively scans up from a directory for the pubspec.yaml
+// this lets us detect the flutter root directory. returns empty string if not found.
+function detectPubspecFromDir(dir: string): string {
+	console.debug("detectPubspecFromDir", dir)
+
+	let previous = undefined
+	for (let current = dir; current != previous; current = path.dirname(current)) {
+		try {
+			fs.statSync(path.join(current, "pubspec.yaml"))
+			return current
+		} catch (error) {
+			if (error.code !== "ENOENT") {
+				throw error
+			}
+		}
+
+		previous = current
+	}
+
+	return ""
+}
+
+// detectRootFromHoverConfig if current editor is the hover.yaml use that to determine the base path.
+// special case, no need to scan workspace if current editor is hover.yaml
+function detectRootFromHoverConfig(currentPath: vscode.Uri): string {
+	if (currentPath.fsPath.endsWith("hover.yaml")) {
+		console.debug("detected hover yaml", currentPath.fsPath)
+		return detectPubspecFromDir(path.dirname(currentPath.fsPath))
+	}
+
+	return ""
+}
+
+// detectRootFromWorkspace detects the root flutter directory from the workspace.
+function detectRootFromWorkspaces(currentPath: vscode.Uri, workspaces: vscode.WorkspaceFolder[]): string {
+	console.debug("detecting flutter root from workspaces", currentPath, workspaces)
+	let workspace = workspaces.find((element) => {
+		return currentPath.toString().startsWith(element.uri.toString())
+	})
+
+	if (isUndefined(workspace)) {
+		return "";
+	}
+
+	return workspace.uri.fsPath
+}
+
+function detectWorkspaceFor(dir: string, workspaces: vscode.WorkspaceFolder[]): vscode.WorkspaceFolder | undefined {
+	console.debug("detectWorkspaceFor", dir, workspaces)
+	let workspace = workspaces.find((element) => {
+		return dir.startsWith(element.uri.fsPath)
+	})
+
+	return workspace
+}
+
+function configOrDefault(p: string, fallback: any): any {
+	try {
+		return { ...fallback, ...jsyaml.load(fs.readFileSync(p, "utf8")) }
+	} catch (error) {
+		vscode.window.showWarningMessage(`failed to read hover.yaml falling back to defaults: ${path}`)
+		return fallback
+	}
+}
+
+function logException(msg: string, cb: () => void): () => void {
+	return () => {
+		try {
+			cb()
+		} catch (error) {
+			console.error(msg, error)
+			throw error
+		}
+	}
+}
 
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
 	console.log('The Hover extension is being activated.');
@@ -44,7 +123,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 	// the actual debugger), we can also obtain the target through the 'program'
 	// value in launch.json
 
-	let disposable = vscode.commands.registerCommand('hover.run', () => {
+	let disposable = vscode.commands.registerCommand('hover.run', logException("hover.run failed", () => {
 		let workspaceFolders = vscode.workspace.workspaceFolders;
 		if (isUndefined(workspaceFolders)) {
 			vscode.window.showErrorMessage('No active workspace available to launch Hover for.');
@@ -57,25 +136,29 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 			return;
 		}
 		const activeDocumentUri = activeEditor.document.uri;
-		let activeWorkspaceFolder: vscode.WorkspaceFolder | undefined;
-		workspaceFolders.forEach(element => {
-			console.log(element.uri.toString());
-			console.log(activeDocumentUri.toString());
-			if (activeDocumentUri.toString().startsWith(element.uri.toString())) {
-				activeWorkspaceFolder = element;
-			}
-		});
-		if (isUndefined(activeWorkspaceFolder)) {
+
+
+		let cwd = detectRootFromHoverConfig(activeDocumentUri) ||
+			detectPubspecFromDir(path.dirname(activeDocumentUri.fsPath)) ||
+			detectRootFromWorkspaces(activeDocumentUri, workspaceFolders)
+
+		if (cwd == "") {
 			vscode.window.showErrorMessage('No active workspace found to launch Hover for.');
 			return;
 		}
 
-		let cwd = activeWorkspaceFolder.uri.fsPath;
-		let target = "lib/main_desktop.dart"; // TODO: make configurable, probably best done through launch configurations with a param...
+		let workspace = detectWorkspaceFor(cwd, workspaceFolders)
+
+		if (isUndefined(workspace)) {
+			vscode.window.showErrorMessage('No active workspace found to launch Hover for.');
+			return;
+		}
+
+		const hoverConfig = configOrDefault(path.join(cwd, "go", "hover.yaml"), { target: "lib/main_desktop.dart" })
 
 		runHoverRun(
 			[
-				"--target", target,
+				"--target", hoverConfig.target,
 				"--colors=false", // TODO: Fix colors in output stream, if possible.
 			],
 			cwd,
@@ -83,7 +166,12 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 			console.log("runHover started, have observatoryUri");
 			vscode.window.showInformationMessage('Starting application in debug mode');
 			console.log("Attaching debugger (flutter attach)");
-			vscode.debug.startDebugging(activeWorkspaceFolder, {
+			let target = hoverConfig.target;
+			let workspaceBasePath = workspace?.uri.fsPath + path.sep;
+			if (!isNullOrUndefined(workspaceBasePath) && cwd.indexOf(workspaceBasePath) === 0) {
+				target = path.join(cwd.slice(workspaceBasePath.length), target);
+			}
+			vscode.debug.startDebugging(workspace, {
 				name: "Flutter attached to Hover",
 				type: "dart",
 				request: "attach",
@@ -95,8 +183,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 			console.log("runHover exception");
 			console.dir(err);
 		});
-
-	});
+	}));
 
 	context.subscriptions.push(disposable);
 	console.log('The Hover extension is now active.');
